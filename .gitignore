@@ -1,0 +1,23 @@
+# Environment variables - never commit!
+.env
+.env.*
+
+# Temporary files
+tmp/
+*.tmp
+tmp/**
+
+# Build output
+dist/
+
+# Node modules
+node_modules/
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+docker-compose.override.yml
+.pnpm-store 

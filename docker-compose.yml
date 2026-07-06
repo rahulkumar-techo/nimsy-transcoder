@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  transcoder:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: nimsy-transcoder
+    restart: unless-stopped
+    command: pnpm dev
+    environment:
+      NODE_ENV: development
+      CHOKIDAR_USEPOLLING: "true"
+    env_file:
+      - .env
+    ports:
+      - "5001:5001"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - nimsy-network
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: nimsy-rabbitmq-dev
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nimsy-network
+
+networks:
+  nimsy-network:
+    driver: bridge
+
+volumes:
+  rabbitmq-data:
