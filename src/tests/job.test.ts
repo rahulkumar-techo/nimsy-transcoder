@@ -77,7 +77,7 @@ describe("job.ts", () => {
     vi.spyOn(fsp, "stat").mockResolvedValue({ size: 2048 } as any);
     const rmSpy = vi.spyOn(fsp, "rm").mockResolvedValue(undefined as any);
 
-    const jobModule = await import("./job.js");
+    const jobModule = await import("./../job.js");
     const processJob = jobModule.default;
 
     const payload = {
@@ -141,7 +141,7 @@ describe("job.ts", () => {
     vi.spyOn(fsp, "mkdir").mockResolvedValue(undefined as any);
     const rmSpy = vi.spyOn(fsp, "rm").mockResolvedValue(undefined as any);
 
-    const jobModule = await import("./job.js");
+    const jobModule = await import("./../job.js");
     const processJob = jobModule.default;
 
     const payload = {
@@ -203,7 +203,7 @@ describe("job.ts", () => {
     vi.spyOn(fsp, "stat").mockResolvedValue({ size: 0 } as any);
     const rmSpy = vi.spyOn(fsp, "rm").mockResolvedValue(undefined as any);
 
-    const jobModule = await import("./job.js");
+    const jobModule = await import("./../job.js");
     const processJob = jobModule.default;
 
     const payload = {
@@ -273,7 +273,7 @@ describe("job.ts", () => {
     vi.spyOn(fsp, "stat").mockResolvedValue({ size: 2048 } as any);
     const rmSpy = vi.spyOn(fsp, "rm").mockResolvedValue(undefined as any);
 
-    const jobModule = await import("./job.js");
+    const jobModule = await import("./../job.js");
     const processJob = jobModule.default;
 
     const payload = {
