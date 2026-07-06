@@ -24,13 +24,13 @@ describe("job.ts", () => {
   });
 
   it("should complete full transcode job successfully", async () => {
-    vi.doMock("./config.js", () => ({
+    vi.doMock("../../src/config.js", () => ({
       config: mockConfig,
       logger,
     }));
 
     const s3Send = vi.fn().mockResolvedValue({});
-    vi.doMock("./s3.js", () => ({
+    vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
     }));
 
@@ -39,37 +39,37 @@ describe("job.ts", () => {
       durationMs: 1200,
       sizeBytes: 1024,
     });
-    vi.doMock("./phases/download-file.js", () => ({
+    vi.doMock("../../src/phases/download-file.js", () => ({
       downloadFile,
     }));
 
     const transcode = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./phases/ffmpe.js", () => ({
+    vi.doMock("../../src/phases/ffmpe.js", () => ({
       transcode,
     }));
 
     const thumbnailGenAndUpload = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./phases/thumbnail.js", () => ({
+    vi.doMock("../../src/phases/thumbnail.js", () => ({
       thumbnailGenAndUpload,
     }));
 
     const notify = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./helper/notify.js", () => ({
+    vi.doMock("../../src/helper/notify.js", () => ({
       notify,
     }));
 
     const uploadWithRetry = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./helper/uploadWithRetry.js", () => ({
+    vi.doMock("../../src/helper/uploadWithRetry.js", () => ({
       uploadWithRetry,
     }));
 
     const retry = vi.fn(async (fn: any) => fn());
-    vi.doMock("./helper/retry.js", () => ({
+    vi.doMock("../../src/helper/retry.js", () => ({
       retry,
     }));
 
     const cleanupPartialUploads = vi.fn();
-    vi.doMock("./helper/cleanupPartialUploads.js", () => ({
+    vi.doMock("../../src/helper/cleanupPartialUploads.js", () => ({
       cleanupPartialUploads,
     }));
 
@@ -113,28 +113,28 @@ describe("job.ts", () => {
   });
 
   it("should cleanup and notify failure when download fails", async () => {
-    vi.doMock("./config.js", () => ({
+    vi.doMock("../../src/config.js", () => ({
       config: mockConfig,
       logger,
     }));
 
     const s3Send = vi.fn().mockResolvedValue({});
-    vi.doMock("./s3.js", () => ({
+    vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
     }));
 
     const downloadFile = vi.fn().mockRejectedValue(new Error("Download failed"));
-    vi.doMock("./phases/download-file.js", () => ({
+    vi.doMock("../../src/phases/download-file.js", () => ({
       downloadFile,
     }));
 
     const cleanupPartialUploads = vi.fn();
-    vi.doMock("./helper/cleanupPartialUploads.js", () => ({
+    vi.doMock("../../src/helper/cleanupPartialUploads.js", () => ({
       cleanupPartialUploads,
     }));
 
     const notify = vi.fn();
-    vi.doMock("./helper/notify.js", () => ({
+    vi.doMock("../../src/helper/notify.js", () => ({
       notify,
     }));
 
@@ -165,13 +165,13 @@ describe("job.ts", () => {
   });
 
   it("should preserve temp source when job fails", async () => {
-    vi.doMock("./config.js", () => ({
+    vi.doMock("../../src/config.js", () => ({
       config: mockConfig,
       logger,
     }));
 
     const s3Send = vi.fn().mockResolvedValue({});
-    vi.doMock("./s3.js", () => ({
+    vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
     }));
 
@@ -180,22 +180,22 @@ describe("job.ts", () => {
       durationMs: 1200,
       sizeBytes: 1024,
     });
-    vi.doMock("./phases/download-file.js", () => ({
+    vi.doMock("../../src/phases/download-file.js", () => ({
       downloadFile,
     }));
 
     const transcode = vi.fn().mockRejectedValue(new Error("Transcode boom"));
-    vi.doMock("./phases/ffmpe.js", () => ({
+    vi.doMock("../../src/phases/ffmpe.js", () => ({
       transcode,
     }));
 
     const cleanupPartialUploads = vi.fn();
-    vi.doMock("./helper/cleanupPartialUploads.js", () => ({
+    vi.doMock("../../src/helper/cleanupPartialUploads.js", () => ({
       cleanupPartialUploads,
     }));
 
     const notify = vi.fn();
-    vi.doMock("./helper/notify.js", () => ({
+    vi.doMock("../../src/helper/notify.js", () => ({
       notify,
     }));
 
@@ -225,13 +225,13 @@ describe("job.ts", () => {
   });
 
   it("should delete temp source when job succeeds", async () => {
-    vi.doMock("./config.js", () => ({
+    vi.doMock("../../src/config.js", () => ({
       config: mockConfig,
       logger,
     }));
 
     const s3Send = vi.fn().mockResolvedValue({});
-    vi.doMock("./s3.js", () => ({
+    vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
     }));
 
@@ -240,32 +240,32 @@ describe("job.ts", () => {
       durationMs: 1200,
       sizeBytes: 1024,
     });
-    vi.doMock("./phases/download-file.js", () => ({
+    vi.doMock("../../src/phases/download-file.js", () => ({
       downloadFile,
     }));
 
     const transcode = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./phases/ffmpe.js", () => ({
+    vi.doMock("../../src/phases/ffmpe.js", () => ({
       transcode,
     }));
 
     const thumbnailGenAndUpload = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./phases/thumbnail.js", () => ({
+    vi.doMock("../../src/phases/thumbnail.js", () => ({
       thumbnailGenAndUpload,
     }));
 
     const notify = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./helper/notify.js", () => ({
+    vi.doMock("../../src/helper/notify.js", () => ({
       notify,
     }));
 
     const uploadWithRetry = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("./helper/uploadWithRetry.js", () => ({
+    vi.doMock("../../src/helper/uploadWithRetry.js", () => ({
       uploadWithRetry,
     }));
 
     const retry = vi.fn(async (fn: any) => fn());
-    vi.doMock("./helper/retry.js", () => ({
+    vi.doMock("../../src/helper/retry.js", () => ({
       retry,
     }));
 
