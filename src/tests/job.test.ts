@@ -43,7 +43,14 @@ describe("job.ts", () => {
       downloadFile,
     }));
 
-    const transcode = vi.fn().mockResolvedValue(undefined);
+    const transcode = vi.fn().mockResolvedValue({
+      outputs: [
+        { name: "240p", path: path.join(mockConfig.TEMP_DIR, "240.mp4") },
+        { name: "360p", path: path.join(mockConfig.TEMP_DIR, "360.mp4") },
+        { name: "480p", path: path.join(mockConfig.TEMP_DIR, "480.mp4") },
+        { name: "720p", path: path.join(mockConfig.TEMP_DIR, "720.mp4") },
+      ],
+    });
     vi.doMock("../../src/phases/ffmpe.js", () => ({
       transcode,
     }));
@@ -91,7 +98,7 @@ describe("job.ts", () => {
     await processJob(payload);
 
     expect(downloadFile).toHaveBeenCalledTimes(1);
-    expect(transcode).toHaveBeenCalledTimes(4);
+    expect(transcode).toHaveBeenCalledTimes(1);
     expect(thumbnailGenAndUpload).toHaveBeenCalledWith({ thumbnailKey: null });
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -244,7 +251,14 @@ describe("job.ts", () => {
       downloadFile,
     }));
 
-    const transcode = vi.fn().mockResolvedValue(undefined);
+    const transcode = vi.fn().mockResolvedValue({
+      outputs: [
+        { name: "240p", path: path.join(mockConfig.TEMP_DIR, "240.mp4") },
+        { name: "360p", path: path.join(mockConfig.TEMP_DIR, "360.mp4") },
+        { name: "480p", path: path.join(mockConfig.TEMP_DIR, "480.mp4") },
+        { name: "720p", path: path.join(mockConfig.TEMP_DIR, "720.mp4") },
+      ],
+    });
     vi.doMock("../../src/phases/ffmpe.js", () => ({
       transcode,
     }));

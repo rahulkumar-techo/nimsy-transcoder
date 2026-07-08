@@ -1,139 +1,110 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("fluent-ffmpeg", () => {
-  const fn = vi.fn();
-  (fn as any).setFfmpegPath = vi.fn();
-  return { default: fn };
+let lastInstance: any;
+const spawnMock = vi.fn(() => {
+  const instance = {
+    on: vi.fn(function (this: any, event: string, handler: (...args: any[]) => void) {
+      instance.on.mock.calls.push([event, handler]);
+      return instance;
+    }),
+    stderr: { on: vi.fn() },
+    stdout: { on: vi.fn() },
+    kill: vi.fn(),
+  };
+  lastInstance = instance;
+  return instance;
 });
 
-vi.mock("ffmpeg-static", () => ({
-  default: "/usr/bin/ffmpeg",
+vi.mock("node:child_process", () => ({
+  spawn: spawnMock as any,
+  execSync: vi.fn(() => "/usr/bin/ffmpeg"),
 }));
 
 describe("phases/ffmpe", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    spawnMock.mockClear();
+    lastInstance = null;
   });
 
-  it("should resolve when end event is emitted", async () => {
-    const fluentFfmpegMock = (await import("fluent-ffmpeg")) as any;
-    (fluentFfmpegMock.default as any).setFfmpegPath = vi.fn();
-
-    fluentFfmpegMock.default.mockImplementation(() => {
-      const handlers: Record<string, (...args: any[]) => void> = {};
-      const command = {
-        videoCodec: vi.fn().mockReturnThis(),
-        audioCodec: vi.fn().mockReturnThis(),
-        outputOptions: vi.fn().mockReturnThis(),
-        output: vi.fn().mockReturnThis(),
-        once: vi.fn((event: string, handler: (...args: any[]) => void) => {
-          handlers[event] = handler;
-          return command;
-        }),
-        on: vi.fn().mockReturnThis(),
-        run: vi.fn(),
-        kill: vi.fn(),
-      };
-      return command;
-    });
-
+  it("should spawn ffmpeg with single output and resolve on exit 0", async () => {
     const { transcode } = await import("../phases/ffmpe.js");
 
     const p = transcode({
       input: "in.mp4",
-      output: "out.mp4",
-      width: 320,
-      height: 180,
+      outputs: [{ name: "720p", path: "out.mp4", width: 1280, height: 720 }],
       timeoutMs: 5000,
     });
 
-    const instance = fluentFfmpegMock.default.mock.results[0]?.value;
-    const endCalls = (instance?.once?.mock?.calls) as any[] | undefined;
-    const endHandler = endCalls?.find(([e]: [string]) => e === "end")?.[1] as (() => void) | undefined;
+    const onCalls = lastInstance.on.mock.calls as any[];
+    onCalls.find(([e]: any) => e === "close")?.[1]?.(0);
 
-    expect(endHandler).toBeDefined();
-    endHandler!();
+    await expect(p).resolves.toEqual({
+      outputs: [{ name: "720p", path: "out.mp4" }],
+    });
+  });
 
-    await expect(p).resolves.toBeUndefined();
+  it("should reject on non-zero exit code", async () => {
+    const { transcode } = await import("../phases/ffmpe.js");
+
+    const p = transcode({
+      input: "in.mp4",
+      outputs: [{ name: "720p", path: "out.mp4", width: 1280, height: 720 }],
+      timeoutMs: 5000,
+    });
+
+    const onCalls = lastInstance.on.mock.calls as any[];
+    const closeHandler = onCalls.find(([e]: any) => e === "close")?.[1];
+    const errorHandler = onCalls.find(([e]: any) => e === "error")?.[1];
+
+    errorHandler?.(null);
+    closeHandler?.(1);
+
+    await expect(p).rejects.toThrow("FFmpeg exited with code 1");
   });
 
   it("should reject after timeout duration", async () => {
-    const fluentFfmpegMock = (await import("fluent-ffmpeg")) as any;
-    (fluentFfmpegMock.default as any).setFfmpegPath = vi.fn();
-
-    fluentFfmpegMock.default.mockImplementation(() => {
-      const command = {
-        videoCodec: vi.fn().mockReturnThis(),
-        audioCodec: vi.fn().mockReturnThis(),
-        outputOptions: vi.fn().mockReturnThis(),
-        output: vi.fn().mockReturnThis(),
-        once: vi.fn().mockReturnThis(),
-        on: vi.fn().mockReturnThis(),
-        run: vi.fn(),
-        kill: vi.fn(),
-      };
-      return command;
-    });
-
     const { transcode } = await import("../phases/ffmpe.js");
 
-    const timeoutMs = 50;
     const p = transcode({
       input: "in.mp4",
-      output: "out.mp4",
-      width: 320,
-      height: 180,
-      timeoutMs,
+      outputs: [{ name: "720p", path: "out.mp4", width: 1280, height: 720 }],
+      timeoutMs: 50,
     });
 
-    const instance = fluentFfmpegMock.default.mock.results[0]?.value;
-    instance.kill.mockClear();
-
-    await expect(p).rejects.toThrow(`Transcode timeout after ${timeoutMs}ms`);
-    expect(instance.kill).toHaveBeenCalledWith("SIGKILL");
+    await expect(p).rejects.toThrow("Transcode timeout after 50ms");
+    expect(lastInstance.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
-  it("should reject on error event", async () => {
-    const fluentFfmpegMock = (await import("fluent-ffmpeg")) as any;
-    (fluentFfmpegMock.default as any).setFfmpegPath = vi.fn();
-
-    fluentFfmpegMock.default.mockImplementation(() => {
-      const handlers: Record<string, (...args: any[]) => void> = {};
-
-      const command = {
-        videoCodec: vi.fn().mockReturnThis(),
-        audioCodec: vi.fn().mockReturnThis(),
-        outputOptions: vi.fn().mockReturnThis(),
-        output: vi.fn().mockReturnThis(),
-        once: vi.fn((event: string, handler: (...args: any[]) => void) => {
-          handlers[event] = handler;
-          return command;
-        }),
-        on: vi.fn().mockReturnThis(),
-        run: vi.fn(),
-        kill: vi.fn(),
-      };
-
-      return command;
-    });
-
+  it("should build multi-output arguments", async () => {
     const { transcode } = await import("../phases/ffmpe.js");
 
     const p = transcode({
       input: "in.mp4",
-      output: "out.mp4",
-      width: 320,
-      height: 180,
+      outputs: [
+        { name: "240p", path: "240.mp4", width: 426, height: 240 },
+        { name: "720p", path: "720.mp4", width: 1280, height: 720 },
+      ],
       timeoutMs: 5000,
     });
 
-    const instance = fluentFfmpegMock.default.mock.results[0]?.value;
-    const errorCalls = (instance?.once?.mock?.calls) as any[] | undefined;
-    const errorHandler = errorCalls?.find(([e]: [string]) => e === "error")?.[1] as ((err: Error) => void) | undefined;
+    const onCalls = lastInstance.on.mock.calls as any[];
+    onCalls.find(([e]: any) => e === "close")?.[1]?.(0);
 
-    expect(errorHandler).toBeDefined();
-    errorHandler!(new Error("ffmpeg boom"));
+    await expect(p).resolves.toEqual({
+      outputs: [
+        { name: "240p", path: "240.mp4" },
+        { name: "720p", path: "720.mp4" },
+      ],
+    });
 
-    await expect(p).rejects.toThrow("ffmpeg boom");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const call = spawnMock.mock.calls[0] as any;
+    expect(call).toBeDefined();
+    const args = call[1] as string[];
+    expect(args).toContain("-filter_complex");
+    expect(args).toContain("-map");
+    expect(args).toContain("[v0out]");
+    expect(args).toContain("[v1out]");
   });
 });

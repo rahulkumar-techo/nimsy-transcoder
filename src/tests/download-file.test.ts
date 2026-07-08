@@ -57,6 +57,8 @@ describe("phases/download-file", () => {
   });
 
   it("should reject and clean up when download times out", async () => {
+    process.env.DOWNLOAD_TIMEOUT_MS = "5000";
+
     vi.useFakeTimers();
 
     vi.doMock("node:stream/promises", async () => {

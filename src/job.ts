@@ -1,6 +1,7 @@
 import { s3 } from "./s3.js";
 import { DeleteObjectCommand } from "@aws-sdk/client-s3";
 
+import { execSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
@@ -13,24 +14,85 @@ import { uploadWithRetry } from "./helper/uploadWithRetry.js";
 import { notify } from "./helper/notify.js";
 import { cleanupPartialUploads } from "./helper/cleanupPartialUploads.js";
 import { thumbnailGenAndUpload } from "./phases/thumbnail.js";
-import { transcode } from "./phases/ffmpe.js";
+import { transcode, type TranscodeOutput } from "./phases/ffmpe.js";
 
-// Supported output resolutions for transcoding
-const RESOLUTIONS = [
+// Target resolutions for every transcoding job.
+// To add/remove renditions, change this array.
+// Example:
+//   const RESOLUTIONS = [
+//     { name: "360p", width: 640, height: 360 },
+//     { name: "1080p", width: 1920, height: 1080 },
+//   ];
+const RESOLUTIONS: readonly Omit<TranscodeOutput, "path">[] = [
   { name: "240p", width: 426, height: 240 },
   { name: "360p", width: 640, height: 360 },
   { name: "480p", width: 854, height: 480 },
   { name: "720p", width: 1280, height: 720 },
 ] as const;
 
+// Fail fast if the temp directory does not have enough free space.
+// Required bytes is doubled as a safety margin for working files.
+//
+// Example:
+//   assertDiskSpace("/tmp/transcoder", 50 * 1024 * 1024)
+//   -> requires ~100 MB free
+function assertDiskSpace(tempDir: string, requiredBytes: number) {
+  const MIN_FREE_BYTES = requiredBytes * 2;
+
+  try {
+    // df -B1 gives byte-level free-space info.
+    // Output example:
+    //   /dev/root  51474468 40422616  11051852   79% /tmp/transcoder
+    const df = execSync(`df -B1 "${tempDir}" 2>/dev/null | tail -1`, {
+      encoding: "utf8",
+    });
+    const parts = df.trim().split(/\s+/);
+    const available = parseInt(parts[3], 10);
+
+    if (Number.isNaN(available) || available < MIN_FREE_BYTES) {
+      throw new Error(
+        `Insufficient disk space on ${tempDir}: need ~${(
+          MIN_FREE_BYTES /
+          1024 /
+          1024 /
+          1024
+        ).toFixed(2)} GB free`
+      );
+    }
+  } catch (err) {
+    // Only rethrow the intentional disk-space failure.
+    // Other errors, such as df missing on Windows, are logged and skipped.
+    if (err instanceof Error && err.message.includes("Insufficient disk space")) {
+      throw err;
+    }
+    logger.warn({ tempDir, err: err instanceof Error ? err.message : String(err) }, "Disk space check skipped");
+  }
+}
+
+// One transcoding job lifecycle:
+//   1. create temp dirs
+//   2. check disk space
+//   3. download source from temp S3 bucket
+//   4. ffmpeg multi-output transcode
+//   5. upload each rendition to production S3
+//   6. thumbnail handling
+//   7. notify backend
+//   8. cleanup temp files
+//   9. delete temp source from S3 on success
 export default async function processJob(payload: TranscoderPayload) {
   const { videoId, objectKey, correlationId, deliveryTag, thumbnailKey } = payload;
   const jobStartedAt = Date.now();
+
+  // Example paths:
+  //   workDir: /tmp/transcoder/jobs/759dbed8-...-1783530746547
+  //   inputFile: /tmp/transcoder/jobs/.../input/original.mp4
+  //   outputDir: /tmp/transcoder/jobs/.../output
   const workDir = path.join(config.TEMP_DIR, "jobs", `${videoId}-${jobStartedAt}`);
   const inputDir = path.join(workDir, "input");
   const outputDir = path.join(workDir, "output");
   const inputFile = path.join(inputDir, "original.mp4");
 
+  // Track which S3 uploads succeeded so they can be cleaned up on failure.
   const uploadedKeys: string[] = [];
   let jobCompletedSuccessfully = false;
 
@@ -42,71 +104,86 @@ export default async function processJob(payload: TranscoderPayload) {
     await fsp.mkdir(inputDir, { recursive: true });
     await fsp.mkdir(outputDir, { recursive: true });
 
-    // 1. Download source file from temp S3 bucket
-    const downloadResult: DownloadResult = await downloadFile({
-      inputFile,
-      objectKey,
-      baseContext,
+    // Abort early if there is not enough disk for the source + outputs.
+    assertDiskSpace(config.TEMP_DIR, 50 * 1024 * 1024);
+
+    // Step 1: download with retry.
+    // Example result:
+    //   { inputFile, durationMs: 7907, sizeBytes: 10677875 }
+    const downloadResult: DownloadResult = await retry(
+      () =>
+        downloadFile({
+          inputFile,
+          objectKey,
+          baseContext,
+        }),
+      3,     // max attempts
+      2000,  // base backoff in ms
+    );
+
+    // Build output descriptors for all target resolutions.
+    const outputs: TranscodeOutput[] = RESOLUTIONS.map((r) => ({
+      name: r.name,
+      width: r.width,
+      height: r.height,
+      // Example:
+      //   path: /tmp/transcoder/jobs/.../output/720p.mp4
+      path: path.join(outputDir, `${r.name}.mp4`),
+    }));
+
+    logger.info(
+      { ...baseContext, outputs: outputs.map((o) => o.name) },
+      "Multi-output transcode started"
+    );
+
+    // Step 2: transcode all renditions in one ffmpeg pass.
+    // Example result:
+    //   { outputs: [{ name: "240p", path: "/tmp/.../240p.mp4" }, ...] }
+    const transcodeStart = Date.now();
+    const { outputs: completedOutputs } = await transcode({
+      input: inputFile,
+      outputs,
+      timeoutMs: config.FFMPEG_TIMEOUT_MS,
     });
+    const transcodeDuration = Date.now() - transcodeStart;
 
-    // 2. Transcode to all target resolutions
-    const qualities: string[] = [];
+    logger.info(
+      {
+        ...baseContext,
+        outputNames: completedOutputs.map((o) => o.name),
+        durationMs: transcodeDuration,
+      },
+      "Multi-output transcode completed"
+    );
 
-    for (const { name, width, height } of RESOLUTIONS) {
-      const output = path.join(outputDir, `${name}.mp4`);
-      const prodKey = `videos/${videoId}/${name}.mp4`;
+    // Step 3: upload each rendition to production S3.
+    for (const output of completedOutputs) {
+      // Example:
+      //   prodKey: videos/759dbed8-...-1783530746547/720p.mp4
+      const prodKey = `videos/${videoId}/${output.name}.mp4`;
 
-      logger.info(
-        { ...baseContext, resolution: name, target: `${width}x${height}` },
-        "Transcoding started"
-      );
-
-      const transcodeStart = Date.now();
-      await transcode({
-        input: inputFile,
-        output,
-        width,
-        height,
-        timeoutMs: config.FFMPEG_TIMEOUT_MS,
-      });
-      const transcodeDuration = Date.now() - transcodeStart;
-
-      const outputStat = await fsp.stat(output);
-
-      logger.info(
-        {
-          ...baseContext,
-          resolution: name,
-          sizeBytes: outputStat.size,
-          durationMs: transcodeDuration,
-        },
-        "Transcoding completed"
-      );
-
-      // Upload to production S3 bucket with retry mechanism
       const uploadStart = Date.now();
-      await uploadWithRetry(config.aws.S3_PROD_BUCKET, prodKey, output, "video/mp4", name, videoId);
+      await uploadWithRetry(config.aws.S3_PROD_BUCKET, prodKey, output.path, "video/mp4", output.name, videoId);
       const uploadDuration = Date.now() - uploadStart;
 
       uploadedKeys.push(prodKey);
-      qualities.push(name);
 
       logger.info(
-        { ...baseContext, resolution: name, durationMs: uploadDuration, key: prodKey },
+        { ...baseContext, resolution: output.name, durationMs: uploadDuration, key: prodKey },
         "Upload completed"
       );
     }
 
-    // 2.1 Copy existing thumbnail to production, or generate and upload a new one
+    // Step 4: thumbnail handling.
     await thumbnailGenAndUpload({ thumbnailKey: thumbnailKey ?? null });
 
-    // 3. Mark success and notify backend
+    // Step 5: success path.
     jobCompletedSuccessfully = true;
 
     const completedPayload: CompletedNotification = {
       videoId,
       status: "PUBLISHED",
-      qualities,
+      qualities: completedOutputs.map((o) => o.name),
       objectKey,
     };
 
@@ -122,7 +199,7 @@ export default async function processJob(payload: TranscoderPayload) {
         status: "completed",
         runtimeMs: Date.now() - jobStartedAt,
         downloadDuration,
-        transcodeCount: qualities.length,
+        transcodeDuration,
         uploadCount: uploadedKeys.length,
         notifyDuration,
       },
@@ -141,10 +218,10 @@ export default async function processJob(payload: TranscoderPayload) {
       "Job failed"
     );
 
-    // Cleanup partial uploads
+    // Cleanup partial uploads from production S3.
     await cleanupPartialUploads(uploadedKeys, videoId);
 
-    // Notify failure
+    // Notify backend so it can mark the video as failed.
     const failedPayload: FailedNotification = {
       videoId,
       error: errorMessage,
@@ -164,7 +241,7 @@ export default async function processJob(payload: TranscoderPayload) {
 
     throw err;
   } finally {
-    // Cleanup local temp directory
+    // Always remove local temp files.
     try {
       logger.info({ videoId, workDir }, "Cleanup started");
       await fsp.rm(workDir, { recursive: true, force: true });
@@ -176,7 +253,8 @@ export default async function processJob(payload: TranscoderPayload) {
       );
     }
 
-    // Conditionally purge temp source from S3 only on success
+    // Only delete the original temp source if the job succeeded.
+    // On failure we keep it for retry/troubleshooting.
     if (jobCompletedSuccessfully) {
       logger.info({ videoId, objectKey }, "Deleting temp source");
 

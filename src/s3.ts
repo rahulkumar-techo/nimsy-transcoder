@@ -3,6 +3,13 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { Agent } from "node:https";
 import { config } from "./config.js";
 
+// Shared S3 client used by download, upload, and cleanup.
+//
+// Key settings:
+// - timeoutMs: overall request/connection timeout from the HTTP handler.
+// - family: 4 forces IPv4 only. Fixes ETIMEDOUT/ENETUNREACH when IPv6 is
+//           unavailable in the container/host.
+// - keepAlive/maxSockets: reuse TCP connections for multiple S3 calls per job.
 export const s3 = new S3Client({
   region: config.aws.AWS_REGION,
   credentials: {
@@ -15,6 +22,7 @@ export const s3 = new S3Client({
     httpsAgent: new Agent({
       keepAlive: true,
       maxSockets: 50,
+      family: 4,
     }),
   }),
 });

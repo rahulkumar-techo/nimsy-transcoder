@@ -4,6 +4,8 @@ RUN apk add --no-cache ffmpeg
 
 WORKDIR /app
 
+ENV TMPDIR=/tmp/transcoder
+
 RUN corepack enable
 
 COPY package.json pnpm-lock.yaml ./

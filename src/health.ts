@@ -1,32 +1,34 @@
 import Fastify from "fastify";
 import { logger } from "./config.js";
+import { isConsumerStarted } from "./queue.js";
 
-
-/**
- * Health check server for container orchestration
- * Provides liveness and readiness endpoints
- */
 export function createHealthServer(port: number = 5001) {
   const server = Fastify({ logger: false });
 
-  // Liveness check - is the process running?
   server.get("/health/live", async () => ({
     status: "ok",
     timestamp: new Date().toISOString(),
   }));
 
-  // Readiness check - can we process jobs?
-  server.get("/health/ready", async () => ({
-    status: "ready",
-    timestamp: new Date().toISOString(),
-  }));
+  server.get("/health/ready", async (_request, reply) => {
+    const ready = isConsumerStarted();
+    if (!ready) {
+      return reply.status(503).send({
+        status: "not ready",
+        reason: "RabbitMQ consumer not started",
+        timestamp: new Date().toISOString(),
+      });
+    }
+    return {
+      status: "ready",
+      timestamp: new Date().toISOString(),
+    };
+  });
 
-  // Metrics endpoint
   server.get("/health/metrics", async () => ({
     uptime: process.uptime(),
     memory: process.memoryUsage(),
-    circuitBreakers: {
-    },
+    rabbitmqReady: isConsumerStarted(),
   }));
 
   const start = async () => {

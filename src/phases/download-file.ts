@@ -7,9 +7,24 @@ import { s3 } from "../s3.js";
 import { config, logger } from "../config.js";
 import { DownloadPayload, DownloadResult } from "../types.js";
 
-// Partial download timeout (5 seconds for small source files)
-const DOWNLOAD_TIMEOUT_MS = 5000;
+// Timeout for a single download attempt.
+// Override with env DOWNLOAD_TIMEOUT_MS=120000 for slower networks.
+// Example:
+//   DOWNLOAD_TIMEOUT_MS=120000 node dist/index.js
+const DOWNLOAD_TIMEOUT_MS =
+  parseInt(process.env.DOWNLOAD_TIMEOUT_MS || "60000", 10);
 
+// Stream an S3 object to a local file with timeout and cleanup.
+//
+// Example payload:
+//   {
+//     inputFile: "/tmp/transcoder/jobs/.../input/original.mp4",
+//     objectKey: "videos/759dbed8-.../original.mp4",
+//     baseContext: { videoId, objectKey, correlationId, deliveryTag }
+//   }
+//
+// Example result:
+//   { inputFile, durationMs: 7907, sizeBytes: 10677875 }
 export async function downloadFile(payload: DownloadPayload): Promise<DownloadResult> {
   const { inputFile, objectKey, baseContext } = payload;
   const ac = new AbortController();
@@ -25,11 +40,13 @@ export async function downloadFile(payload: DownloadPayload): Promise<DownloadRe
 
   try {
     await Promise.race([
+      // Stream response body directly to disk.
       pipeline(
         prePareDownload.Body as NodeJS.ReadableStream,
         fs.createWriteStream(inputFile),
         { signal: ac.signal }
       ),
+      // Hard timeout so a stalled download does not hang forever.
       delay(DOWNLOAD_TIMEOUT_MS, null, { signal: ac.signal }).then(() => {
         throw new Error(`Download timeout after ${DOWNLOAD_TIMEOUT_MS}ms`);
       }),
