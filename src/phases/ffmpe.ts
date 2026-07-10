@@ -1,217 +1,109 @@
-import { execSync, spawn } from "node:child_process";
-import ffmpegPath from "ffmpeg-static";
-
+import ffmpeg from "fluent-ffmpeg";
 import { logger } from "../config.js";
 
-// Prefer system-installed ffmpeg, then ffmpeg-static, then FFMPEG_PATH env.
-// Example:
-//   FFMPEG_PATH=/usr/local/bin/ffmpeg node dist/index.js
-//   apk add --no-cache ffmpeg  -> resolves to /usr/bin/ffmpeg
-let resolvedFfmpeg: string | null = null;
+// Use system ffmpeg path
+ffmpeg.setFfmpegPath("/usr/bin/ffmpeg");
 
-try {
-  resolvedFfmpeg = process.env.FFMPEG_PATH ?? execSync("command -v ffmpeg", {
-    encoding: "utf8",
-  }).trim();
-} catch {
-  if (typeof ffmpegPath === "string") {
-    resolvedFfmpeg = ffmpegPath;
-  }
-}
-
-if (!resolvedFfmpeg) {
-  throw new Error("FFmpeg binary not found.");
-}
-
-// Describes one rendition to generate.
-// Example:
-//   { name: "720p", width: 1280, height: 720, path: "/tmp/.../720p.mp4" }
 export interface TranscodeOutput {
   name: string;
-  path: string;
   width: number;
   height: number;
 }
 
 export interface TranscodeOptions {
-  input: string;
-  // Example:
-  // outputs = [
-  //   { name: "240p", width: 426, height: 240, path: "/tmp/.../240p.mp4" },
-  //   { name: "720p", width: 1280, height: 720, path: "/tmp/.../720p.mp4" }
-  // ]
-  outputs: readonly TranscodeOutput[];
+  inputPath: string;
+  outputPath: string;
+  output: TranscodeOutput;
   timeoutMs: number;
+  durationSec: number;
 }
 
-export interface TranscodeResult {
-  outputs: Array<{ name: string; path: string }>;
-}
+// FIX 1: Respect the engine overrides configured in docker-compose.yml
+const HW_ACCEL_MODE = process.env.FFMPEG_HWACCEL || "cpu";
+const IS_LOCAL = process.env.NODE_ENV !== "production";
 
-// Build a single ffmpeg filter_complex string that decodes once and scales
-// into N outputs. This avoids decoding the source file N times.
-// 
-// Example for 240p + 720p:
-//   [0:v]split=2[v0][v1];[v0]scale=426:240[v0out];[v1]scale=1280:720[v1out]
-function buildFilterComplex(outputs: readonly TranscodeOutput[]): string {
-  const numOutputs = outputs.length;
-  // Temporary labels after split: v0, v1, v2, ...
-  const splitLabels = Array.from({ length: numOutputs }, (_, i) => `v${i}`);
-  // Final labels after scale: v0out, v1out, v2out, ...
-  const scaleOutLabels = Array.from({ length: numOutputs }, (_, i) => `v${i}out`);
-
-  const parts: string[] = [];
-
-  // Split the video stream into N identical branches.
-  parts.push(
-    `[0:v]split=${numOutputs}${splitLabels.map((label) => `[${label}]`).join("")}`
-  );
-
-  // Scale each branch to its target resolution.
-  // Example: [v0]scale=426:240[v0out]
-  for (let i = 0; i < numOutputs; i++) {
-    parts.push(
-      `[${splitLabels[i]}]scale=${outputs[i].width}:${outputs[i].height}[${scaleOutLabels[i]}]`
-    );
-  }
-
-  return parts.join(";");
-}
-
-// Build the full ffmpeg CLI argument list for multi-output transcoding.
-// Example output array:
-//   [
-//     "-nostdin", "-i", "input.mp4",
-//     "-filter_complex", "[0:v]split=2[v0][v1];[v0]scale=426:240[v0out];[v1]scale=1280:720[v1out]",
-//     "-map", "[v0out]", "-map", "0:a?", ... "-c:v", "libx264", ... "240p.mp4",
-//     "-map", "[v1out]", "-map", "0:a?", ... "-c:v", "libx264", ... "720p.mp4"
-//   ]
-function buildArguments(
-  input: string,
-  outputs: readonly TranscodeOutput[]
-): string[] {
-  const args: string[] = [
-    "-nostdin",
-    "-i",
-    input,
-    "-filter_complex",
-    buildFilterComplex(outputs),
-    "-loglevel",
-    "verbose",
-  ];
-
-  for (let i = 0; i < outputs.length; i++) {
-    args.push(
-      "-map",
-      // Map the scaled video branch for this output.
-      // Must use brackets because [v0out] is a named filter output/pad label.
-      // Example: -map [v0out]
-      `[v${i}out]`,
-      // Map the input audio if it exists; "?" means okay if missing.
-      "-map",
-      "0:a?",
-      "-c:v",
-      "libx264",
-      "-preset",
-      "veryfast",
-      "-crf",
-      "23",
-      "-movflags",
-      "+faststart",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "128k",
-      outputs[i].path
-    );
-  }
-
-  return args;
-}
-
-// Spawn a single ffmpeg process that produces multiple outputs from one decode.
-//
-// Example invocation:
-//   transcode({
-//     input: "/tmp/.../original.mp4",
-//     outputs: [
-//       { name: "240p", width: 426, height: 240, path: "/tmp/.../240p.mp4" },
-//       { name: "720p", width: 1280, height: 720, path: "/tmp/.../720p.mp4" }
-//     ],
-//     timeoutMs: 1800000
-//   })
-export const transcode = ({
-  input,
-  outputs,
+export async function transcode({
+  inputPath,
+  outputPath,
+  output,
   timeoutMs,
-}: TranscodeOptions): Promise<TranscodeResult> => {
-  return new Promise((res, rej) => {
-    const args = buildArguments(input, outputs);
-    const child = spawn(resolvedFfmpeg!, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+}: TranscodeOptions): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let isKilledByTimeout = false;
 
-    // Hard timeout guard. If ffmpeg hangs, kill it and fail fast.
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      rej(
-        new Error(
-          `Transcode timeout after ${timeoutMs}ms` +
-            (stderr.length > 0 ? `\nFFmpeg stderr: ${stderr}` : "")
-        )
+    const cmd = ffmpeg(inputPath)
+      .output(outputPath)
+      .audioCodec("aac")
+      .size(`${output.width}x${output.height}`);
+
+    // Determine the configuration matrix add in if  && HW_ACCEL_MODE === "gpu"
+    if (IS_LOCAL&& HW_ACCEL_MODE === "gpu") {
+    logger.info({ resolution: output.name }, "Configuring Intel QSV Hardware Accelerated Pipeline");
+
+    cmd.videoCodec("h264_qsv");
+    cmd.outputOptions([
+      "-init_hw_device qsv=hw",  // FIX 2: Force explicit hardware initialization for Docker containers
+      "-preset veryfast",       // Ultra-fast hardware slice execution
+      "-global_quality 23",     // QSV constant quality (Equivalent to CRF 23)
+      "-movflags +faststart",   // Shift index data to the front for web streaming
+    ]);
+  } else {
+    // Fallback or Production Path
+    const targetPreset = IS_LOCAL ? "-preset ultrafast" : "-preset veryfast";
+    logger.info({ resolution: output.name, preset: targetPreset }, "Configuring High-Efficiency CPU Encoder");
+
+    cmd.videoCodec("libx264");
+    cmd.outputOptions([
+      targetPreset,
+      "-movflags +faststart",
+      "-threads 2"              // FIX 3: Pins execution threads to stay stable under Docker Compose resource limits
+    ]);
+  }
+
+  // Set up failsafe system timeout monitor
+  const timer = setTimeout(() => {
+    isKilledByTimeout = true;
+    cmd.kill("SIGKILL");
+    reject(new Error(`FFmpeg processing timeout hit at ${timeoutMs}ms`));
+  }, timeoutMs);
+
+  cmd
+    .on("start", (cli) => {
+      logger.info({ resolution: output.name, cli }, "FFmpeg processing initiated");
+    })
+    .on("progress", (p) => {
+      logger.debug(
+        {
+          resolution: output.name,
+          percent: p.percent?.toFixed(1) ?? "0.0",
+          fps: p.currentFps,
+          frame: p.frames,
+          timemark: p.timemark,
+        },
+        "FFmpeg transcoding progress"
       );
-    }, timeoutMs);
-
-    // Capture stdout/stderr for diagnostics.
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    // ffmpeg logs progress to stderr, not stdout.
-    // Example progress line:
-    //   frame= 12 fps= 45 q=23.0 size= 512kB time=00:00:00.50 bitrate=8256.3kbits/s speed=0.8x
-    child.stderr.on("data", (data) => {
-      const text = data.toString();
-      stderr += text;
-      const timeMatch = text.match(/time=(\d+):(\d+):(\d+\.\d+)/);
-      if (timeMatch) {
-        logger.debug(
-          {
-            outputs: outputs.map((o) => o.name),
-            currentTime: `${timeMatch[1]}:${timeMatch[2]}:${timeMatch[3]}`,
-          },
-          "FFmpeg progress"
-        );
-      }
-    });
-
-    child.on("error", (err) => {
+    })
+    .on("end", () => {
       clearTimeout(timer);
-      rej(err);
-    });
-
-    child.on("close", (code) => {
+      logger.info({ resolution: output.name }, "FFmpeg transcode stream complete");
+      resolve();
+    })
+    .on("error", (err, _stdout, stderr) => {
       clearTimeout(timer);
-      if (code === 0) {
-        logger.info(
-          { outputs: outputs.map((o) => o.name) },
-          "FFmpeg multi-output complete"
-        );
-        res({ outputs: outputs.map((o) => ({ name: o.name, path: o.path })) });
-      } else {
-        // Include ffmpeg's full stderr/stdout so failures are diagnosable
-        // without having to rerun with extra logging.
-        const trimmedStderr = stderr.trim();
-        const errorMessage =
-          `FFmpeg exited with code ${code}` +
-          (trimmedStderr.length > 0 ? `\nstderr: ${trimmedStderr}` : "") +
-          (stdout.trim().length > 0 ? `\nstdout: ${stdout.trim()}` : "");
-        logger.error({ code, input, outputs: outputs.map((o) => o.name), stderr, stdout }, errorMessage);
-        rej(new Error(errorMessage));
-      }
-    });
-  });
-};
+
+      // Prevent bubble errors if the job was intentionally destroyed by the system timeout
+      if (isKilledByTimeout) return;
+
+      logger.error(
+        {
+          resolution: output.name,
+          err: err.message,
+          stderr: stderr || "No standard error dump captured"
+        },
+        "FFmpeg worker pipeline crashed"
+      );
+      reject(err);
+    })
+    .run();
+});
+}

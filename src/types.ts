@@ -25,7 +25,6 @@ export interface TranscoderPayload {
   videoId: string;
   objectKey: string;
   correlationId: string;
-  deliveryTag: string;
   thumbnailKey?: string;
 }
 

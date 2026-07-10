@@ -1,12 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import fs from "node:fs";
-import fsp from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { Readable } from "node:stream";
 
 vi.mock("../../src/config.js", () => ({
   config: {
-    aws: { S3_TEMP_BUCKET: "temp-bucket" },
+    aws: { S3_TEMP_BUCKET: "temp-bucket", S3_PROD_BUCKET: "prod-bucket" },
+    FFMPEG_TIMEOUT_MS: 1000,
   },
   logger: {
     info: vi.fn(),
@@ -23,88 +21,54 @@ vi.mock("../../src/s3.js", () => ({
   },
 }));
 
+vi.mock("@aws-sdk/lib-storage", () => ({
+  Upload: class MockUpload {
+    done = vi.fn().mockResolvedValue(undefined);
+  }
+}));
+
 describe("phases/download-file", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
   });
 
-  it("should return metrics after successful download", async () => {
-    const content = "fake video content";
-    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "transcode-test-"));
-    const sourcePath = path.join(tmpDir, "source.mp4");
-    await fsp.writeFile(sourcePath, content);
+  it("should run pipeline and resolve on success", async () => {
+    const inputStream = Readable.from(["fake video content"]);
+    mockS3Send.mockResolvedValue({ Body: inputStream });
 
-    const readable = fs.createReadStream(sourcePath);
-    mockS3Send.mockResolvedValueOnce({ Body: readable });
+    const transcode = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("../../src/phases/ffmpe.js", () => ({
+      transcode,
+    }));
 
-    const { downloadFile } = await import("../phases/download-file.js");
+    const { processVideoPipeline } = await import("../phases/download-file.js");
 
-    const outPath = path.join(tmpDir, "out.mp4");
-    const result = await downloadFile({
-      objectKey: "uploads/v.mp4",
-      inputFile: outPath,
-      baseContext: { videoId: "1", objectKey: "uploads/v.mp4", correlationId: "c1", deliveryTag: "dt1" },
+    await processVideoPipeline({
+      inputKey: "uploads/v.mp4",
+      outputKey: "videos/1/720p.mp4",
+      outputConfig: { name: "720p", width: 1280, height: 720 },
     });
 
-    expect(result).toEqual(
+    expect(transcode).toHaveBeenCalledTimes(1);
+    expect(transcode).toHaveBeenCalledWith(
       expect.objectContaining({
-        inputFile: expect.stringContaining("out.mp4"),
-        durationMs: expect.any(Number),
-        sizeBytes: content.length,
+        output: expect.objectContaining({ name: "720p" }),
       })
     );
   });
 
-  it("should reject and clean up when download times out", async () => {
-    process.env.DOWNLOAD_TIMEOUT_MS = "5000";
-
-    vi.useFakeTimers();
-
-    vi.doMock("node:stream/promises", async () => {
-      const actual = await vi.importActual("node:stream/promises");
-      return {
-        ...actual,
-        pipeline: vi.fn(() => new Promise(() => {})),
-      };
-    });
-
-    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "transcode-test-"));
-    const sourcePath = path.join(tmpDir, "exists.mp4");
-    await fsp.writeFile(sourcePath, "exists");
-
-    mockS3Send.mockResolvedValueOnce({
-      Body: fs.createReadStream(sourcePath),
-    });
-
-    const { downloadFile } = await import("../phases/download-file.js");
-
-    const outPath = path.join(tmpDir, "timeout-out.mp4");
-
-    const p = downloadFile({
-      objectKey: "uploads/v.mp4",
-      inputFile: outPath,
-      baseContext: { videoId: "2", objectKey: "uploads/v.mp4", correlationId: "c2", deliveryTag: "dt2" },
-    });
-
-    await vi.advanceTimersByTimeAsync(10000);
-
-    await expect(p).rejects.toThrow(/Download timeout/);
-
-    vi.useRealTimers();
-  });
-
   it("should reject when s3 returns empty body", async () => {
-    mockS3Send.mockResolvedValueOnce({ Body: null });
+    mockS3Send.mockResolvedValue({ Body: null });
 
-    const { downloadFile } = await import("../phases/download-file.js");
+    const { processVideoPipeline } = await import("../phases/download-file.js");
 
     await expect(
-      downloadFile({
-        objectKey: "uploads/v.mp4",
-        inputFile: path.join(os.tmpdir(), "empty.mp4"),
-        baseContext: { videoId: "3", objectKey: "uploads/v.mp4", correlationId: "c3", deliveryTag: "dt3" },
+      processVideoPipeline({
+        inputKey: "uploads/v.mp4",
+        outputKey: "videos/1/720p.mp4",
+        outputConfig: { name: "720p", width: 1280, height: 720 },
       })
-    ).rejects.toThrow("Download failed: empty response body");
+    ).rejects.toThrow("Empty S3 object body for key: uploads/v.mp4");
   });
 });

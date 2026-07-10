@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import path from "node:path";
 import os from "node:os";
 import fsp from "node:fs/promises";
+import { Readable } from "node:stream";
 
 const mockConfig = {
   aws: { S3_TEMP_BUCKET: "temp-bucket", S3_PROD_BUCKET: "prod-bucket" },
@@ -17,6 +18,14 @@ const logger = {
   fatal: vi.fn(),
 };
 
+vi.mock("@aws-sdk/lib-storage", () => ({
+  Upload: vi.fn().mockImplementation(function () {
+    return {
+      done: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
+}));
+
 describe("job.ts", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -29,28 +38,12 @@ describe("job.ts", () => {
       logger,
     }));
 
-    const s3Send = vi.fn().mockResolvedValue({});
+    const s3Send = vi.fn().mockResolvedValue({ Body: Readable.from([]) });
     vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
     }));
 
-    const downloadFile = vi.fn().mockResolvedValue({
-      inputFile: path.join(mockConfig.TEMP_DIR, "in.mp4"),
-      durationMs: 1200,
-      sizeBytes: 1024,
-    });
-    vi.doMock("../../src/phases/download-file.js", () => ({
-      downloadFile,
-    }));
-
-    const transcode = vi.fn().mockResolvedValue({
-      outputs: [
-        { name: "240p", path: path.join(mockConfig.TEMP_DIR, "240.mp4") },
-        { name: "360p", path: path.join(mockConfig.TEMP_DIR, "360.mp4") },
-        { name: "480p", path: path.join(mockConfig.TEMP_DIR, "480.mp4") },
-        { name: "720p", path: path.join(mockConfig.TEMP_DIR, "720.mp4") },
-      ],
-    });
+    const transcode = vi.fn().mockResolvedValue(undefined);
     vi.doMock("../../src/phases/ffmpe.js", () => ({
       transcode,
     }));
@@ -91,15 +84,13 @@ describe("job.ts", () => {
       videoId: "vid-1",
       objectKey: "uploads/original.mp4",
       correlationId: "corr-1",
-      deliveryTag: "dt-1",
       thumbnailKey: undefined,
     };
 
-    await processJob(payload);
+    await processJob(payload, "dt-1");
 
-    expect(downloadFile).toHaveBeenCalledTimes(1);
-    expect(transcode).toHaveBeenCalledTimes(1);
-    expect(thumbnailGenAndUpload).toHaveBeenCalledWith({ thumbnailKey: null });
+    expect(transcode).toHaveBeenCalledTimes(4);
+    expect(thumbnailGenAndUpload).toHaveBeenCalledWith({ thumbnailKey: null, videoId: "vid-1", videoObjectKey: "uploads/original.mp4" });
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({
         videoId: "vid-1",
@@ -114,9 +105,8 @@ describe("job.ts", () => {
     expect(cleanupPartialUploads).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ status: "completed" }),
-      "Job completed"
+      "Job completed successfully"
     );
-    expect(rmSpy).toHaveBeenCalled();
   });
 
   it("should cleanup and notify failure when download fails", async () => {
@@ -125,14 +115,14 @@ describe("job.ts", () => {
       logger,
     }));
 
-    const s3Send = vi.fn().mockResolvedValue({});
+    const s3Send = vi.fn().mockResolvedValue({ Body: Readable.from([]) });
     vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
     }));
 
-    const downloadFile = vi.fn().mockRejectedValue(new Error("Download failed"));
-    vi.doMock("../../src/phases/download-file.js", () => ({
-      downloadFile,
+    const transcode = vi.fn().mockRejectedValue(new Error("Download failed"));
+    vi.doMock("../../src/phases/ffmpe.js", () => ({
+      transcode,
     }));
 
     const cleanupPartialUploads = vi.fn();
@@ -155,20 +145,18 @@ describe("job.ts", () => {
       videoId: "vid-fail",
       objectKey: "uploads/original.mp4",
       correlationId: "corr-fail",
-      deliveryTag: "dt-fail",
       thumbnailKey: undefined,
     };
 
-    await expect(processJob(payload)).rejects.toThrow("Download failed");
+    await expect(processJob(payload, "dt-fail")).rejects.toThrow("Download failed");
 
-    expect(cleanupPartialUploads).toHaveBeenCalledWith([], "vid-fail");
+    expect(cleanupPartialUploads).toHaveBeenCalledWith(["videos/vid-fail/240p.mp4"], "vid-fail");
     expect(notify).toHaveBeenCalledWith(
       { videoId: "vid-fail", error: "Download failed" },
       "corr-fail",
       "dt-fail",
       true
     );
-    expect(rmSpy).toHaveBeenCalled();
   });
 
   it("should preserve temp source when job fails", async () => {
@@ -177,18 +165,9 @@ describe("job.ts", () => {
       logger,
     }));
 
-    const s3Send = vi.fn().mockResolvedValue({});
+    const s3Send = vi.fn().mockResolvedValue({ Body: Readable.from([]) });
     vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
-    }));
-
-    const downloadFile = vi.fn().mockResolvedValue({
-      inputFile: path.join(mockConfig.TEMP_DIR, "in.mp4"),
-      durationMs: 1200,
-      sizeBytes: 1024,
-    });
-    vi.doMock("../../src/phases/download-file.js", () => ({
-      downloadFile,
     }));
 
     const transcode = vi.fn().mockRejectedValue(new Error("Transcode boom"));
@@ -217,18 +196,20 @@ describe("job.ts", () => {
       videoId: "vid-ok",
       objectKey: "uploads/original.mp4",
       correlationId: "corr-ok",
-      deliveryTag: "dt-ok",
       thumbnailKey: undefined,
     };
 
-    await expect(processJob(payload)).rejects.toThrow("Transcode boom");
+    await expect(processJob(payload, "dt-ok")).rejects.toThrow("Transcode boom");
 
     expect(logger.warn).toHaveBeenCalledWith(
       { videoId: "vid-ok", objectKey: "uploads/original.mp4" },
-      "Preserving temp source for retry/troubleshooting"
+      "Preserved temp source for troubleshooting"
     );
-    expect(s3Send).not.toHaveBeenCalled();
-    expect(rmSpy).toHaveBeenCalled();
+    expect(s3Send).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      { videoId: "vid-ok", objectKey: "uploads/original.mp4" },
+      "Preserved temp source for troubleshooting"
+    );
   });
 
   it("should delete temp source when job succeeds", async () => {
@@ -237,28 +218,12 @@ describe("job.ts", () => {
       logger,
     }));
 
-    const s3Send = vi.fn().mockResolvedValue({});
+    const s3Send = vi.fn().mockResolvedValue({ Body: Readable.from([]) });
     vi.doMock("../../src/s3.js", () => ({
       s3: { send: s3Send },
     }));
 
-    const downloadFile = vi.fn().mockResolvedValue({
-      inputFile: path.join(mockConfig.TEMP_DIR, "in.mp4"),
-      durationMs: 1200,
-      sizeBytes: 1024,
-    });
-    vi.doMock("../../src/phases/download-file.js", () => ({
-      downloadFile,
-    }));
-
-    const transcode = vi.fn().mockResolvedValue({
-      outputs: [
-        { name: "240p", path: path.join(mockConfig.TEMP_DIR, "240.mp4") },
-        { name: "360p", path: path.join(mockConfig.TEMP_DIR, "360.mp4") },
-        { name: "480p", path: path.join(mockConfig.TEMP_DIR, "480.mp4") },
-        { name: "720p", path: path.join(mockConfig.TEMP_DIR, "720.mp4") },
-      ],
-    });
+    const transcode = vi.fn().mockResolvedValue(undefined);
     vi.doMock("../../src/phases/ffmpe.js", () => ({
       transcode,
     }));
@@ -294,17 +259,15 @@ describe("job.ts", () => {
       videoId: "vid-ok",
       objectKey: "uploads/original.mp4",
       correlationId: "corr-ok",
-      deliveryTag: "dt-ok",
       thumbnailKey: undefined,
     };
 
-    await processJob(payload);
+    await processJob(payload, "dt-ok");
 
-    expect(s3Send).toHaveBeenCalledTimes(1);
+    expect(s3Send).toHaveBeenCalledTimes(5);
     expect(logger.info).toHaveBeenCalledWith(
       { videoId: "vid-ok", objectKey: "uploads/original.mp4" },
       "Temp source deleted"
     );
-    expect(rmSpy).toHaveBeenCalled();
   });
 });

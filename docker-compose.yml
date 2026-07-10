@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   transcoder:
     build:
@@ -8,7 +6,9 @@ services:
     container_name: nimsy-transcoder
     restart: unless-stopped
     command: pnpm dev
+    user: "root"
     environment:
+      FFMPEG_HWACCEL: cpu          # Enabled GPU acceleration
       NODE_ENV: development
       CHOKIDAR_USEPOLLING: "true"
       TMPDIR: /tmp/transcoder
@@ -16,40 +16,17 @@ services:
       - .env
     ports:
       - "5001:5001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - .:/app
       - /app/node_modules
       - transcoder-tmp:/tmp/transcoder
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - nimsy-network
-
-  rabbitmq:
-    image: rabbitmq:4-management
-    container_name: nimsy-rabbitmq-dev
-    restart: unless-stopped
-    environment:
-      RABBITMQ_DEFAULT_USER: admin
-      RABBITMQ_DEFAULT_PASS: admin
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    volumes:
-      - rabbitmq-data:/var/lib/rabbitmq
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - nimsy-network
-
-networks:
-  nimsy-network:
-    driver: bridge
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'              # Raised to 4.0 to leverage full 11th Gen i3 scaling
+          memory: 2000M
 
 volumes:
-  rabbitmq-data:
   transcoder-tmp:
